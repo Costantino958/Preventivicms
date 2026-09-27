@@ -1,0 +1,257 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from io import BytesIO, StringIO
+
+st.set_page_config(page_title="Preventivatore CMS", layout="wide")
+
+st.title("🏭 Preventivatore Automatico CMS")
+st.markdown("Carica una distinta, ottieni il preventivo in 30 secondi")
+
+# =====================================================
+# SECTION 1: CARICA DB FORNITORI
+# =====================================================
+st.sidebar.header("⚙️ Configurazione")
+
+# DB fornitori di default (puoi sostituirlo)
+default_fornitori = """componente,prezzo_unitario,lead_time_giorni,fornitore
+Motore 24V,120,15,Fornitore A
+Motore 24V,95,20,Fornitore B
+Sensore induttivo,8,10,Fornitore C
+Cuscinetto SKF,15,7,Fornitore A
+Vite M6,0.5,5,Fornitore D
+Guarnizione,2.5,10,Fornitore C
+Cilindro pneumatico,45,12,Fornitore B
+Encoder,35,14,Fornitore A
+Scheda PLC,180,20,Fornitore C
+Connettore IP67,3,8,Fornitore D"""
+
+# Opzione: carica DB fornitori
+st.sidebar.subheader("Database Fornitori")
+db_source = st.sidebar.radio("Scegli fonte:", ["CSV di default", "Carica CSV custom"])
+
+if db_source == "Carica CSV custom":
+    file_fornitori = st.sidebar.file_uploader("Carica CSV fornitori", type="csv")
+    if file_fornitori:
+        df_fornitori = pd.read_csv(file_fornitori)
+    else:
+        st.sidebar.info("Usa il CSV di default")
+        df_fornitori = pd.read_csv(StringIO(default_fornitori))
+else:
+    df_fornitori = pd.read_csv(StringIO(default_fornitori))
+
+with st.sidebar.expander("📋 Visualizza DB Fornitori"):
+    st.dataframe(df_fornitori, use_container_width=True)
+
+# Margine %
+margine_percentuale = st.sidebar.slider("Margine (%)", 10, 50, 30, step=5)
+
+# =====================================================
+# SECTION 2: CARICA DISTINTA
+# =====================================================
+st.header("1️⃣ Carica la Distinta")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    file_distinta = st.file_uploader("Carica distinta (CSV o Excel)", type=["csv", "xlsx"])
+
+with col2:
+    if st.button("📝 Usa esempio"):
+        example_distinta = """componente,quantita,materiale,note
+Motore 24V,2,Alluminio,Velocità 1500 rpm
+Sensore induttivo,5,Acciaio inox,M12 connettore
+Cilindro pneumatico,1,Acciaio,Corsa 100mm
+Vite M6,20,Acciaio,DIN 912
+Scheda PLC,1,Plastica,CPU 32bit"""
+        file_distinta = pd.StringIO(example_distinta)
+
+if file_distinta is not None:
+    # Parse distinta
+    try:
+        df_distinta = pd.read_csv(file_distinta)
+    except:
+        try:
+            df_distinta = pd.read_excel(file_distinta)
+        except:
+            st.error("❌ Errore nel caricamento del file")
+    
+    st.success("✅ Distinta caricata")
+    
+    with st.expander("📋 Visualizza Distinta"):
+        st.dataframe(df_distinta, use_container_width=True)
+    
+    # =====================================================
+    # SECTION 3: CALCOLO PREVENTIVO
+    # =====================================================
+    st.header("2️⃣ Calcolo Preventivo")
+    
+    # Crea lista risultati
+    risultati = []
+    totale_costo_base = 0
+    componenti_non_trovati = []
+    
+    for idx, row in df_distinta.iterrows():
+        componente = str(row['componente']).strip()
+        quantita = float(row['quantita'])
+        
+        # Cerca nei fornitori (prezzo più basso)
+        fornitori_match = df_fornitori[df_fornitori['componente'].str.lower() == componente.lower()]
+        
+        if len(fornitori_match) > 0:
+            # Scegli il più economico
+            riga_best = fornitori_match.loc[fornitori_match['prezzo_unitario'].idxmin()]
+            prezzo_unitario = riga_best['prezzo_unitario']
+            fornitore = riga_best['fornitore']
+            lead_time = riga_best['lead_time_giorni']
+            costo_riga = prezzo_unitario * quantita
+        else:
+            # Componente non trovato
+            prezzo_unitario = 0
+            fornitore = "N/A"
+            lead_time = 0
+            costo_riga = 0
+            componenti_non_trovati.append(componente)
+        
+        risultati.append({
+            'componente': componente,
+            'quantita': quantita,
+            'prezzo_unitario': prezzo_unitario,
+            'costo_riga': costo_riga,
+            'fornitore': fornitore,
+            'lead_time': lead_time
+        })
+        
+        totale_costo_base += costo_riga
+    
+    df_risultati = pd.DataFrame(risultati)
+    
+    # Calcoli finali
+    totale_costo_base = round(totale_costo_base, 2)
+    margine_euro = round(totale_costo_base * margine_percentuale / 100, 2)
+    totale_con_margine = round(totale_costo_base + margine_euro, 2)
+    
+    # Mostra risultati
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Costo Base", f"€{totale_costo_base:,.2f}")
+    with col2:
+        st.metric("Margine (%)", f"{margine_percentuale}%")
+    with col3:
+        st.metric("Margine (€)", f"€{margine_euro:,.2f}")
+    with col4:
+        st.metric("Prezzo Finale", f"€{totale_con_margine:,.2f}", delta=f"+{margine_percentuale}%")
+    
+    # Tabella dettagliata
+    st.subheader("Dettaglio Componenti")
+    st.dataframe(
+        df_risultati[['componente', 'quantita', 'prezzo_unitario', 'costo_riga', 'fornitore', 'lead_time']],
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    # Avviso componenti non trovati
+    if componenti_non_trovati:
+        st.warning(f"⚠️ Componenti non trovati nel DB fornitori: {', '.join(componenti_non_trovati)}")
+    
+    # =====================================================
+    # SECTION 4: GENERAZIONE PDF
+    # =====================================================
+    st.header("3️⃣ Genera Preventivo PDF")
+    
+    nome_cliente = st.text_input("Nome Cliente", "Nuovo Cliente")
+    numero_preventivo = st.text_input("Numero Preventivo", f"PRE-{datetime.now().strftime('%Y%m%d%H%M')}")
+    note_aggiuntive = st.text_area("Note aggiuntive", "Consegna FOB. Validità 30 giorni. IVA esclusa.")
+    
+    if st.button("📄 Genera PDF Preventivo"):
+        # Crea PDF
+        pdf_buffer = BytesIO()
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, topMargin=1*cm, bottomMargin=1*cm)
+        
+        # Stili
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor("#1a237e"),
+            spaceAfter=20,
+            alignment=1
+        )
+        
+        # Contenuto
+        story = []
+        
+        # Intestazione
+        story.append(Paragraph("CMS - Contract Manufacturer", styles['Heading2']))
+        story.append(Paragraph("Pianoro, Bologna", styles['Normal']))
+        story.append(Spacer(1, 0.5*cm))
+        
+        story.append(Paragraph(f"<b>PREVENTIVO #{numero_preventivo}</b>", title_style))
+        story.append(Paragraph(f"Data: {datetime.now().strftime('%d/%m/%Y')}", styles['Normal']))
+        story.append(Spacer(1, 0.3*cm))
+        
+        # Dati cliente
+        story.append(Paragraph(f"<b>Cliente:</b> {nome_cliente}", styles['Normal']))
+        story.append(Spacer(1, 0.3*cm))
+        
+        # Tabella preventivo
+        data = [['Componente', 'Qtà', 'Prezzo Unit.', 'Importo', 'Fornitore']]
+        for _, row in df_risultati.iterrows():
+            data.append([
+                row['componente'],
+                str(int(row['quantita'])),
+                f"€ {row['prezzo_unitario']:.2f}",
+                f"€ {row['costo_riga']:.2f}",
+                row['fornitore']
+            ])
+        
+        # Totali
+        data.append(['', '', '', '', ''])
+        data.append(['', '', 'TOTALE', f"€ {totale_costo_base:.2f}", ''])
+        data.append(['', '', f'Margine {margine_percentuale}%', f"€ {margine_euro:.2f}", ''])
+        data.append(['', '', '<b>TOTALE PREVENTIVO</b>', f"<b>€ {totale_con_margine:.2f}</b>", ''])
+        
+        tabella = Table(data, colWidths=[5*cm, 1.5*cm, 2*cm, 2*cm, 2.5*cm])
+        tabella.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, -3), (-1, -1), colors.HexColor("#e8eaf6")),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+            ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+        ]))
+        
+        story.append(tabella)
+        story.append(Spacer(1, 0.5*cm))
+        
+        # Note
+        if note_aggiuntive:
+            story.append(Paragraph(f"<b>Note:</b> {note_aggiuntive}", styles['Normal']))
+        
+        # Build PDF
+        doc.build(story)
+        pdf_buffer.seek(0)
+        
+        # Download
+        st.download_button(
+            label="📥 Scarica PDF Preventivo",
+            data=pdf_buffer,
+            file_name=f"Preventivo_{numero_preventivo}.pdf",
+            mime="application/pdf"
+        )
+        
+        st.success("✅ PDF generato! Clicca il pulsante qui sopra per scaricare.")
+
+else:
+    st.info("👆 Carica una distinta per iniziare, oppure usa l'esempio.")
+j
